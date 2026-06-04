@@ -3,6 +3,13 @@
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-7">
+        <div class="mb-3">
+            <a href="{{ url_for('customer_detail', customer_id=customer.id) }}" class="btn btn-link text-decoration-none p-0 d-inline-flex align-items-center" style="color: #007AFF;">
+                <i class="bi bi-arrow-left fs-5 me-1"></i>
+                <span>Back to {{ customer.name }}</span>
+            </a>
+        </div>
+        
         <div class="ios-card">
             <div class="d-flex align-items-center mb-3">
                 <i class="bi bi-person-circle fs-1 me-3" style="color: #007AFF;"></i>
@@ -23,29 +30,23 @@
                     <input type="file" name="photo" class="form-control" accept="image/*" capture="environment">
                     <div class="form-text">Snap a picture of the item</div>
                 </div>
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Storage Price (₦)</label>
-                        <input type="number" name="storage_price" step="0.01" class="form-control search-bar" value="10000.00" required>
-                        <div class="form-text">Price in Nigerian Naira</div>
-                    </div>
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Payment Type</label>
-                        <select name="payment_type" class="form-select search-bar" required>
-                            <option value="half">Half Payment (50%)</option>
-                            <option value="full">Full Payment (100%)</option>
-                        </select>
-                    </div>
+                <div class="mb-3">
+                    <label class="form-label">Storage Price (₦)</label>
+                    <input type="number" name="storage_price" step="0.01" class="form-control search-bar" placeholder="Enter storage price in Naira" required>
+                    <div class="form-text">Price in Nigerian Naira (Full payment required for collection)</div>
                 </div>
                 <div class="mb-3">
                     <label class="form-label">Initial Payment (₦)</label>
-                    <input type="number" name="amount_paid" step="0.01" class="form-control search-bar" value="0.00">
+                    <input type="number" name="amount_paid" step="0.01" class="form-control search-bar" placeholder="Enter initial payment amount (0 if none)">
                     <div class="form-text">Amount customer is paying now (in Naira)</div>
                 </div>
                 <button type="submit" class="btn btn-primary ios-button ios-button-primary w-100">
                     <i class="bi bi-cloud-upload"></i> Store Item
                 </button>
             </form>
+            <div class="alert alert-info mt-3 small">
+                <i class="bi bi-info-circle"></i> Note: Full payment (100%) is required before item can be collected.
+            </div>
         </div>
     </div>
 </div>
