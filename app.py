@@ -56,23 +56,18 @@ class Item(db.Model):
     photo_filename = db.Column(db.String(200))
     storage_price = db.Column(db.Float, default=10000.0)  # Price in Naira
     amount_paid = db.Column(db.Float, default=0.0)
-    payment_type = db.Column(db.String(20), default='half')  # 'half' or 'full'
+    payment_type = db.Column(db.String(20), default='full')  # ONLY 'full' now
     status = db.Column(db.String(20), default='active')  # active, collected, expired
     stored_at = db.Column(db.DateTime, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('customers.id'), nullable=False)
 
     def is_fully_paid(self):
-        if self.payment_type == 'full':
-            return self.amount_paid >= self.storage_price
-        else:  # half payment
-            return self.amount_paid >= (self.storage_price / 2)
+        # Always check against full storage price
+        return self.amount_paid >= self.storage_price
 
     def remaining_balance(self):
-        if self.payment_type == 'full':
-            return max(0, self.storage_price - self.amount_paid)
-        else:
-            return max(0, (self.storage_price / 2) - self.amount_paid)
+        return max(0, self.storage_price - self.amount_paid)
 
     def is_expired(self):
         """Item expires 48 hours after stored_at if not collected"""
@@ -93,6 +88,26 @@ class Item(db.Model):
         minutes = int((remaining.total_seconds() % 3600) // 60)
         return f"{hours}h {minutes}m"
 
+class ArchivedItem(db.Model):
+    __tablename__ = 'archived_items'
+    id = db.Column(db.Integer, primary_key=True)
+    original_item_id = db.Column(db.Integer, nullable=False)
+    unique_token = db.Column(db.String(36), unique=True)
+    description = db.Column(db.String(200), nullable=False)
+    photo_filename = db.Column(db.String(200))
+    storage_price = db.Column(db.Float, default=10000.0)
+    amount_paid = db.Column(db.Float, default=0.0)
+    payment_type = db.Column(db.String(20), default='full')
+    customer_name = db.Column(db.String(100), nullable=False)
+    customer_phone = db.Column(db.String(20), nullable=False)
+    customer_email = db.Column(db.String(100))
+    stored_at = db.Column(db.DateTime)
+    collected_at = db.Column(db.DateTime)
+    archived_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<ArchivedItem {self.description} - {self.customer_name}>'
+
 # ---------- Helper Functions ----------
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -102,6 +117,77 @@ def format_naira(amount):
     return f"₦{amount:,.2f}"
 
 app.jinja_env.filters['naira'] = format_naira
+
+@app.template_filter('timesince')
+def timesince(dt, default="just now"):
+    """Returns string representing 'time since' e.g. 3 days ago"""
+    if dt is None:
+        return default
+    
+    now = datetime.utcnow()
+    diff = now - dt
+    
+    seconds = diff.total_seconds()
+    
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    elif seconds < 86400:
+        hours = int(seconds // 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    elif seconds < 604800:
+        days = int(seconds // 86400)
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    elif seconds < 2592000:
+        weeks = int(seconds // 604800)
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    else:
+        months = int(seconds // 2592000)
+        return f"{months} month{'s' if months != 1 else ''} ago"
+
+def auto_archive_collected_items():
+    """Automatically archive items that were collected more than 48 hours ago"""
+    cutoff_time = datetime.utcnow() - timedelta(hours=48)
+    
+    # Find collected items older than 48 hours that haven't been archived yet
+    items_to_archive = Item.query.filter(
+        Item.status == 'collected',
+        Item.collected_at <= cutoff_time
+    ).all()
+    
+    archived_count = 0
+    for item in items_to_archive:
+        # Check if already archived (by original_item_id)
+        existing = ArchivedItem.query.filter_by(original_item_id=item.id).first()
+        if existing:
+            continue
+            
+        # Create archive record
+        archived = ArchivedItem(
+            original_item_id=item.id,
+            unique_token=item.unique_token,
+            description=item.description,
+            photo_filename=item.photo_filename,
+            storage_price=item.storage_price,
+            amount_paid=item.amount_paid,
+            payment_type=item.payment_type,
+            customer_name=item.customer.name,
+            customer_phone=item.customer.phone,
+            customer_email=item.customer.email,
+            stored_at=item.stored_at,
+            collected_at=item.collected_at,
+            archived_at=datetime.utcnow()
+        )
+        db.session.add(archived)
+        archived_count += 1
+    
+    if archived_count > 0:
+        db.session.commit()
+        print(f"[Auto-Archive] Archived {archived_count} collected items")
+    
+    return archived_count
 
 # ---------- Routes ----------
 @app.route('/')
@@ -224,7 +310,6 @@ def store_item(customer_id):
     if request.method == 'POST':
         description = request.form.get('description')
         storage_price = float(request.form.get('storage_price', 10000))
-        payment_type = request.form.get('payment_type')  # 'half' or 'full'
         amount_paid = float(request.form.get('amount_paid', 0))
         
         # Handle photo upload
@@ -241,7 +326,7 @@ def store_item(customer_id):
             photo_filename=photo_filename,
             storage_price=storage_price,
             amount_paid=amount_paid,
-            payment_type=payment_type,
+            payment_type='full',  # Always full payment
             customer_id=customer.id
         )
         db.session.add(item)
@@ -295,6 +380,9 @@ def collect_item(token):
 @app.route('/dashboard')
 def dashboard():
     """Public dashboard to view all items"""
+    # Auto-archive collected items older than 48 hours
+    auto_archive_collected_items()
+    
     # Search and filter parameters
     search_query = request.args.get('search', '').strip()
     filter_status = request.args.get('status', 'all')
@@ -386,6 +474,104 @@ def delete_expired_items():
     flash(f'Successfully deleted {count} expired item(s)', 'success')
     return redirect(url_for('dashboard'))
 
+# ---------- Archive Routes ----------
+@app.route('/archive')
+def archive_history():
+    """View archived items history"""
+    search_query = request.args.get('search', '').strip()
+    filter_date = request.args.get('date', 'all')  # today, week, month, all
+    
+    query = ArchivedItem.query
+    
+    # Search filter
+    if search_query:
+        query = query.filter(
+            db.or_(
+                ArchivedItem.description.ilike(f'%{search_query}%'),
+                ArchivedItem.customer_name.ilike(f'%{search_query}%'),
+                ArchivedItem.customer_phone.ilike(f'%{search_query}%'),
+                ArchivedItem.unique_token.ilike(f'%{search_query}%')
+            )
+        )
+    
+    # Date filter
+    now = datetime.utcnow()
+    if filter_date == 'today':
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        query = query.filter(ArchivedItem.archived_at >= start)
+    elif filter_date == 'week':
+        start = now - timedelta(days=7)
+        query = query.filter(ArchivedItem.archived_at >= start)
+    elif filter_date == 'month':
+        start = now - timedelta(days=30)
+        query = query.filter(ArchivedItem.archived_at >= start)
+    
+    archived_items = query.order_by(ArchivedItem.archived_at.desc()).all()
+    
+    # Statistics
+    total_archived = ArchivedItem.query.count()
+    total_value = sum(item.storage_price for item in archived_items)
+    total_paid = sum(item.amount_paid for item in archived_items)
+    
+    return render_template('archive_history.html',
+                         archived_items=archived_items,
+                         search_query=search_query,
+                         filter_date=filter_date,
+                         total_archived=total_archived,
+                         total_value=total_value,
+                         total_paid=total_paid)
+
+@app.route('/archive/<int:archive_id>/restore', methods=['POST'])
+def restore_from_archive(archive_id):
+    """Restore an archived item back to active items"""
+    archived = ArchivedItem.query.get_or_404(archive_id)
+    
+    # Check if original customer still exists
+    customer = Customer.query.filter_by(phone=archived.customer_phone).first()
+    if not customer:
+        flash(f'Cannot restore: Customer {archived.customer_name} no longer exists', 'danger')
+        return redirect(url_for('archive_history'))
+    
+    # Create new item from archived data
+    new_item = Item(
+        description=archived.description,
+        photo_filename=archived.photo_filename,
+        storage_price=archived.storage_price,
+        amount_paid=archived.amount_paid,
+        payment_type=archived.payment_type,
+        status='active',
+        stored_at=archived.stored_at,
+        customer_id=customer.id
+    )
+    db.session.add(new_item)
+    db.session.commit()
+    
+    flash(f'Item "{archived.description}" restored successfully!', 'success')
+    return redirect(url_for('archive_history'))
+
+@app.route('/archive/clear', methods=['POST'])
+def clear_old_archives():
+    """Delete archives older than specified days"""
+    days = int(request.form.get('days', 90))
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    
+    old_archives = ArchivedItem.query.filter(ArchivedItem.archived_at <= cutoff).all()
+    count = len(old_archives)
+    
+    # Delete photos from filesystem
+    for archive in old_archives:
+        if archive.photo_filename:
+            photo_path = os.path.join(app.config['UPLOAD_FOLDER'], archive.photo_filename)
+            if os.path.exists(photo_path):
+                os.remove(photo_path)
+    
+    # Delete from database
+    ArchivedItem.query.filter(ArchivedItem.archived_at <= cutoff).delete()
+    db.session.commit()
+    
+    flash(f'Deleted {count} archived items older than {days} days', 'success')
+    return redirect(url_for('archive_history'))
+
 # ---------- API Endpoints ----------
 @app.route('/api/item/<token>')
 def api_get_item(token):
@@ -395,9 +581,31 @@ def api_get_item(token):
         'description': item.description,
         'status': item.status,
         'paid': item.amount_paid,
-        'required': item.storage_price if item.payment_type == 'full' else item.storage_price/2,
+        'required': item.storage_price,
         'remaining': item.remaining_balance(),
         'time_remaining': item.time_remaining()
+    })
+
+@app.route('/api/archive/stats')
+def api_archive_stats():
+    """Return archive statistics"""
+    total_archived = ArchivedItem.query.count()
+    total_value = sum(item.storage_price for item in ArchivedItem.query.all())
+    total_paid = sum(item.amount_paid for item in ArchivedItem.query.all())
+    
+    # Monthly breakdown
+    from sqlalchemy import func
+    monthly = db.session.query(
+        func.strftime('%Y-%m', ArchivedItem.archived_at).label('month'),
+        func.count(ArchivedItem.id).label('count'),
+        func.sum(ArchivedItem.storage_price).label('value')
+    ).group_by('month').order_by('month').all()
+    
+    return jsonify({
+        'total_archived': total_archived,
+        'total_value': total_value,
+        'total_paid': total_paid,
+        'monthly': [{'month': m.month, 'count': m.count, 'value': m.value} for m in monthly]
     })
 
 if __name__ == '__main__':
